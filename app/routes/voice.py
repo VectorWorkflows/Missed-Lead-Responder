@@ -1,4 +1,4 @@
-# app/routes/voice.py
+cat << 'EOF' > app/routes/voice.py
 import urllib.parse
 import asyncio
 from fastapi import APIRouter, Form, Response, BackgroundTasks, Request
@@ -14,6 +14,10 @@ from datetime import datetime, timezone
 from twilio.twiml.voice_response import VoiceResponse
 
 router = APIRouter(prefix="/webhook", tags=["Voice"])
+
+# Live Agency Booking & Intake Links
+CALCOM_URL = "https://cal.com/vectorworkflows/meeting-for-caller"
+TALLY_URL = "https://tally.so/r/0QRgZN"
 
 def clean_phone_number(phone: str) -> str:
     if not phone:
@@ -58,15 +62,11 @@ async def handle_ivr_action(
 
     response = VoiceResponse()
 
-    # Define your actual links here or in MongoDB
-    intake_url = "https://vectorworkflows.com/intake"
-    calendar_url = "https://calendly.com/vectorworkflows/audit"
-
-    # Base lead document
+    # Base lead record
     new_lead = {
         "client_id": client_id,
         "caller_phone": caller,
-        "twilio_number": client_config.get("twilio_number"),
+        "twilio_number": client_config.get("twilio_number") if client_config else "",
         "call_sid": CallSid,
         "call_time": datetime.now(timezone.utc),
         "call_status": "IVR_COMPLETED",
@@ -78,49 +78,50 @@ async def handle_ivr_action(
     }
 
     if Digits == "1":
-        # Press 1: Voicemail
-        new_lead["reply_text"] = "🎙️ [Caller chose to leave Voicemail]"
+        # Option 1: Voicemail
+        new_lead["reply_text"] = "🎙️ [Recording Voicemail...]"
         await leads_collection.update_one({"call_sid": CallSid}, {"$set": new_lead}, upsert=True)
 
-        recording_action = f"https://lead.vectorworkflows.com/webhook/recording-status?client_id={client_id}&caller={urllib.parse.quote_plus(caller)}"
+        encoded_caller = urllib.parse.quote_plus(caller)
+        recording_action = f"https://lead.vectorworkflows.com/webhook/recording-status?client_id={client_id}&caller={encoded_caller}"
         twiml = generate_voicemail_twiml(recording_action_url=recording_action)
         return Response(content=twiml, media_type="application/xml")
 
     elif Digits == "2":
-        # Press 2: Intake Form
-        sms_text = f"Hey! Here is the link to our Vector Workflows intake form: {intake_url} — fill it out anytime and we will review your automation scope!"
-        new_lead["reply_text"] = "📋 [Requested Intake Form Link]"
+        # Option 2: Tally Intake Form
+        sms_text = f"Hey! Here is our Vector Workflows project intake form: {TALLY_URL} — fill it out and we will review your automation scope!"
+        new_lead["reply_text"] = "📋 [Requested Tally Intake Form Link]"
         await leads_collection.update_one({"call_sid": CallSid}, {"$set": new_lead}, upsert=True)
 
         background_tasks.add_task(send_custom_sms, client_config, caller, CallSid, sms_text, "INTAKE_LINK")
         background_tasks.add_task(send_telegram_lead_alert, client_config, new_lead)
         background_tasks.add_task(asyncio.to_thread, log_new_lead_reply, client_config, new_lead)
 
-        response.say("We just sent you a text with our project intake form. Feel free to fill it out whenever you are ready. Goodbye!", voice="Polly.Amy")
+        response.say("We just texted you our intake form link. Feel free to fill it out whenever you are ready. Goodbye!", voice="Polly.Amy")
         response.hangup()
 
     elif Digits == "3":
-        # Press 3: Calendar Audit Link
-        sms_text = f"Thanks for reaching out to Vector Workflows! You can pick a 15-minute workflow audit slot directly on our calendar here: {calendar_url}"
-        new_lead["reply_text"] = "📅 [Requested 15-Min Audit Calendar Link]"
+        # Option 3: Cal.com Meeting Booking
+        sms_text = f"Thanks for calling Vector Workflows! You can book a 15-minute workflow audit directly here: {CALCOM_URL}"
+        new_lead["reply_text"] = "📅 [Requested 15-Min Audit Cal.com Link]"
         await leads_collection.update_one({"call_sid": CallSid}, {"$set": new_lead}, upsert=True)
 
         background_tasks.add_task(send_custom_sms, client_config, caller, CallSid, sms_text, "CALENDAR_LINK")
         background_tasks.add_task(send_telegram_lead_alert, client_config, new_lead)
         background_tasks.add_task(asyncio.to_thread, log_new_lead_reply, client_config, new_lead)
 
-        response.say("We've texted you our direct booking link. Pick a time that works best for you. Goodbye!", voice="Polly.Amy")
+        response.say("We've texted you our direct booking calendar. Pick a time that works best for you. Goodbye!", voice="Polly.Amy")
         response.hangup()
 
     else:
-        # Default / Timeout (No digit pressed)
+        # Option 4: Timeout / Fallback (Text all links)
         sms_text = (
             f"Hey from Vector Workflows! Here are our direct access links:\n\n"
-            f"1️⃣ 15-Min Workflow Audit: {calendar_url}\n"
-            f"2️⃣ Intake Form: {intake_url}\n\n"
+            f"📅 Book 15-Min Audit: {CALCOM_URL}\n"
+            f"📋 Project Intake Form: {TALLY_URL}\n\n"
             f"Reply to this text directly if you have any questions!"
         )
-        new_lead["reply_text"] = "📦 [Stayed on line: Sent All Agency Links]"
+        new_lead["reply_text"] = "📦 [Stayed on Line: Dispatched All Agency Links]"
         await leads_collection.update_one({"call_sid": CallSid}, {"$set": new_lead}, upsert=True)
 
         background_tasks.add_task(send_custom_sms, client_config, caller, CallSid, sms_text, "ALL_LINKS_FALLBACK")
@@ -140,23 +141,28 @@ async def handle_recording_status(
     CallSid: str = Form(...),
     TranscriptionText: str = Form(None)
 ):
-    """Triggered when a voicemail finishes recording."""
     caller = clean_phone_number(caller)
     client_config = await client_configs_collection.find_one({"_id": client_id})
+    if not client_config:
+        client_config = await client_configs_collection.find_one({})
 
-    rec_display = f"🎙️ Audio: {RecordingUrl}"
+    audio_link = f"{RecordingUrl}.mp3" if RecordingUrl else "N/A"
+    
+    rec_display = f"🎙️ Audio: {audio_link}"
     if TranscriptionText:
         rec_display += f"\n📝 Transcript: \"{TranscriptionText}\""
 
     update_payload = {
         "reply_text": rec_display,
-        "recording_url": RecordingUrl
+        "recording_url": audio_link,
+        "transcription": TranscriptionText or ""
     }
-    await leads_collection.update_one({"call_sid": CallSid}, {"$set": update_payload})
+    await leads_collection.update_one({"call_sid": CallSid}, {"$set": update_payload}, upsert=True)
 
-    if client_config:
-        lead_data = await leads_collection.find_one({"call_sid": CallSid})
+    lead_data = await leads_collection.find_one({"call_sid": CallSid})
+    if lead_data and client_config:
         background_tasks.add_task(send_telegram_lead_alert, client_config, lead_data)
         background_tasks.add_task(asyncio.to_thread, log_new_lead_reply, client_config, lead_data)
 
     return Response(content="<Response></Response>", media_type="application/xml")
+EOF
