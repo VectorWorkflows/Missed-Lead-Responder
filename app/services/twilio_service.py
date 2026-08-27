@@ -29,7 +29,6 @@ def generate_ivr_twiml(action_url: str) -> str:
     )
     response.append(gather)
 
-    # Fallback if the user presses nothing (Timeout)
     response.say(
         "Thanks for holding! We just texted you all our links. Have a great day!",
         voice="Polly.Amy",
@@ -39,8 +38,8 @@ def generate_ivr_twiml(action_url: str) -> str:
 
     return str(response)
 
-def generate_voicemail_twiml(recording_action_url: str) -> str:
-    """Prompts caller to record a voicemail."""
+def generate_voicemail_twiml(recording_action_url: str, transcribe_callback_url: str) -> str:
+    """Prompts caller to record a voicemail and triggers transcription."""
     response = VoiceResponse()
     response.say(
         "Please describe your project, problem, or workflow bottleneck after the tone. Press pound or hang up when finished.",
@@ -49,10 +48,11 @@ def generate_voicemail_twiml(recording_action_url: str) -> str:
     )
     response.record(
         action=recording_action_url,
+        transcribe=True,
+        transcribe_callback=transcribe_callback_url,
         max_length=120,
         finish_on_key="#",
-        play_beep=True,
-        transcribe=True
+        play_beep=True
     )
     response.say("Thank you, we received your recording. We will be in touch shortly!", voice="Polly.Amy")
     response.hangup()

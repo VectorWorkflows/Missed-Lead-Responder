@@ -1,3 +1,4 @@
+# app/routes/voice.py
 import urllib.parse
 import asyncio
 from fastapi import APIRouter, Form, Response, BackgroundTasks, Request
@@ -8,13 +9,12 @@ from app.services.twilio_service import (
     send_custom_sms
 )
 from app.services.sheets_service import log_new_lead_reply
-from app.services.telegram_bot import send_telegram_lead_alert
+from app.services.telegram_bot import send_telegram_lead_alert, get_telegram_app
 from datetime import datetime, timezone
 from twilio.twiml.voice_response import VoiceResponse
 
 router = APIRouter(prefix="/webhook", tags=["Voice"])
 
-# Live Agency Booking & Intake Links
 CALCOM_URL = "https://cal.com/vectorworkflows/meeting-for-caller"
 TALLY_URL = "https://tally.so/r/0QRgZN"
 
@@ -61,7 +61,6 @@ async def handle_ivr_action(
 
     response = VoiceResponse()
 
-    # Base lead record
     new_lead = {
         "client_id": client_id,
         "caller_phone": caller,
@@ -77,17 +76,20 @@ async def handle_ivr_action(
     }
 
     if Digits == "1":
-        # Option 1: Voicemail
-        new_lead["reply_text"] = "🎙️ [Recording Voicemail...]"
+        new_lead["reply_text"] = "🎙️ [Caller Recording Voicemail...]"
         await leads_collection.update_one({"call_sid": CallSid}, {"$set": new_lead}, upsert=True)
 
         encoded_caller = urllib.parse.quote_plus(caller)
         recording_action = f"https://lead.vectorworkflows.com/webhook/recording-status?client_id={client_id}&caller={encoded_caller}"
-        twiml = generate_voicemail_twiml(recording_action_url=recording_action)
+        transcribe_action = f"https://lead.vectorworkflows.com/webhook/transcription-status?client_id={client_id}&caller={encoded_caller}"
+        
+        twiml = generate_voicemail_twiml(
+            recording_action_url=recording_action,
+            transcribe_callback_url=transcribe_action
+        )
         return Response(content=twiml, media_type="application/xml")
 
     elif Digits == "2":
-        # Option 2: Tally Intake Form
         sms_text = f"Hey! Here is our Vector Workflows project intake form: {TALLY_URL} — fill it out and we will review your automation scope!"
         new_lead["reply_text"] = "📋 [Requested Tally Intake Form Link]"
         await leads_collection.update_one({"call_sid": CallSid}, {"$set": new_lead}, upsert=True)
@@ -100,7 +102,6 @@ async def handle_ivr_action(
         response.hangup()
 
     elif Digits == "3":
-        # Option 3: Cal.com Meeting Booking
         sms_text = f"Thanks for calling Vector Workflows! You can book a 15-minute workflow audit directly here: {CALCOM_URL}"
         new_lead["reply_text"] = "📅 [Requested 15-Min Audit Cal.com Link]"
         await leads_collection.update_one({"call_sid": CallSid}, {"$set": new_lead}, upsert=True)
@@ -113,7 +114,6 @@ async def handle_ivr_action(
         response.hangup()
 
     else:
-        # Option 4: Timeout / Fallback (Text all links)
         sms_text = (
             f"Hey from Vector Workflows! Here are our direct access links:\n\n"
             f"📅 Book 15-Min Audit: {CALCOM_URL}\n"
@@ -137,8 +137,7 @@ async def handle_recording_status(
     caller: str,
     background_tasks: BackgroundTasks,
     RecordingUrl: str = Form(None),
-    CallSid: str = Form(...),
-    TranscriptionText: str = Form(None)
+    CallSid: str = Form(...)
 ):
     caller = clean_phone_number(caller)
     client_config = await client_configs_collection.find_one({"_id": client_id})
@@ -147,14 +146,9 @@ async def handle_recording_status(
 
     audio_link = f"{RecordingUrl}.mp3" if RecordingUrl else "N/A"
     
-    rec_display = f"🎙️ Audio: {audio_link}"
-    if TranscriptionText:
-        rec_display += f"\n📝 Transcript: \"{TranscriptionText}\""
-
     update_payload = {
-        "reply_text": rec_display,
-        "recording_url": audio_link,
-        "transcription": TranscriptionText or ""
+        "reply_text": "🎙️ [Left Voicemail Audio]",
+        "recording_url": audio_link
     }
     await leads_collection.update_one({"call_sid": CallSid}, {"$set": update_payload}, upsert=True)
 
@@ -162,5 +156,45 @@ async def handle_recording_status(
     if lead_data and client_config:
         background_tasks.add_task(send_telegram_lead_alert, client_config, lead_data)
         background_tasks.add_task(asyncio.to_thread, log_new_lead_reply, client_config, lead_data)
+
+    return Response(content="<Response></Response>", media_type="application/xml")
+
+
+@router.post("/transcription-status")
+async def handle_transcription_status(
+    client_id: str,
+    background_tasks: BackgroundTasks,
+    TranscriptionText: str = Form(None),
+    CallSid: str = Form(...)
+):
+    """Fired asynchronously by Twilio once the AI finishes processing the voice audio."""
+    if TranscriptionText:
+        print(f"📝 Received Voicemail Transcript for Call {CallSid}: \"{TranscriptionText}\"")
+        
+        await leads_collection.update_one(
+            {"call_sid": CallSid},
+            {"$set": {
+                "transcription": TranscriptionText,
+                "reply_text": f"🎙️ [Voicemail Transcript]: \"{TranscriptionText}\""
+            }}
+        )
+
+        client_config = await client_configs_collection.find_one({"_id": client_id})
+        lead_data = await leads_collection.find_one({"call_sid": CallSid})
+        
+        if client_config and lead_data:
+            # Drop the transcript in Google Sheets
+            background_tasks.add_task(asyncio.to_thread, log_new_lead_reply, client_config, lead_data)
+            
+            chat_id = client_config.get("owner_telegram_chat_id")
+            if chat_id:
+                app = get_telegram_app()
+                async def send_transcript_msg():
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"📝 *Voicemail Transcript ({lead_data.get('caller_phone')}):*\n\n_\"{TranscriptionText}\"_",
+                        parse_mode="Markdown"
+                    )
+                background_tasks.add_task(send_transcript_msg)
 
     return Response(content="<Response></Response>", media_type="application/xml")
