@@ -1,50 +1,58 @@
-# app/services/twilio_service.py
-from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse, Dial
+from twilio.rest import Client
 from app.config import settings
 from app.database import leads_collection
 from datetime import datetime, timezone
 
-# Initialize the official Twilio REST Client
 twilio_client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
 
-def generate_dial_twiml(forwarding_phone: str, client_id: str, caller: str) -> str:
-    """Generates TwiML to forward the call and track its status."""
+def generate_dial_twiml(forwarding_number: str, status_callback_url: str, business_name: str = "Vector Workflows") -> str:
     response = VoiceResponse()
-    
-    # timeout=20 means if it rings for 20 seconds without answer, it's missed
-    dial = Dial(
-        timeout=20, 
-        action=f"/webhook/voice-status?client_id={client_id}&caller={caller}"
+
+    # Neural voice greeting
+    response.say(
+        f"Thank you for calling {business_name}. Please hold while we connect your call.",
+        voice="Polly.Amy",
+        language="en-US"
     )
-    dial.number(forwarding_phone)
+
+    dial = Dial(
+        action=status_callback_url,
+        method="POST",
+        timeout=20
+    )
+    dial.number(
+        forwarding_number,
+        status_callback_event="initiated ringing answered completed",
+        status_callback=status_callback_url,
+        status_callback_method="POST"
+    )
     response.append(dial)
-    
+
     return str(response)
 
-async def send_missed_call_sms(client_config: dict, to_phone: str, call_sid: str):
-    """Sends the immediate auto-reply SMS and logs it in MongoDB."""
-    message_body = client_config.get("initial_sms_template", "").format(
-        business_name=client_config.get("business_name", "your business")
+async def send_missed_call_sms(client_config: dict, caller_phone: str, call_sid: str):
+    template = client_config.get(
+        "initial_sms_template", 
+        "Hey, sorry we missed your call at {business_name}! What's the issue and when's a good time for a quick callback?"
     )
+    business_name = client_config.get("business_name", "our team")
+    body = template.format(business_name=business_name)
 
     try:
-        # Fire the SMS via Twilio
-        message = twilio_client.messages.create(
-            body=message_body,
+        msg = twilio_client.messages.create(
+            body=body,
             from_=client_config["twilio_number"],
-            to=to_phone
+            to=caller_phone
         )
-
-        # Update the MongoDB lead record
         await leads_collection.update_one(
             {"call_sid": call_sid},
             {"$set": {
                 "initial_sms_sent": True,
-                "initial_sms_time": datetime.now(timezone.utc)
+                "initial_sms_time": datetime.now(timezone.utc),
+                "initial_sms_sid": msg.sid
             }}
         )
-        print(f"✅ Auto-reply sent to {to_phone} (Message SID: {message.sid})")
-        
+        print(f"✅ Missed call recovery SMS sent to {caller_phone} (SID: {msg.sid})")
     except Exception as e:
-        print(f"❌ Failed to send SMS to {to_phone}: {str(e)}")
+        print(f"❌ Failed to send SMS to {caller_phone}: {e}")
