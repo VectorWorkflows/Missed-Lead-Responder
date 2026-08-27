@@ -1,4 +1,3 @@
-cat << 'EOF' > app/routes/voice.py
 import urllib.parse
 import asyncio
 from fastapi import APIRouter, Form, Response, BackgroundTasks, Request
@@ -165,4 +164,3 @@ async def handle_recording_status(
         background_tasks.add_task(asyncio.to_thread, log_new_lead_reply, client_config, lead_data)
 
     return Response(content="<Response></Response>", media_type="application/xml")
-EOF
