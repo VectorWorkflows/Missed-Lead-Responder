@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  # 1. MongoDB Service
+  mongo:
+    image: mongo:6.0
+    container_name: lead_responder_db
+    restart: always
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_DATABASE=missed_call_responder
+
+  # 2. FastAPI Lead Responder App
+  app:
+    build: .
+    container_name: lead_responder_app
+    restart: always
+    depends_on:
+      - mongo
+    env_file:
+      - .env
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/missed_call_responder
+      - PORT=8000
+    ports:
+      - "8000:8000"
+
+volumes:
+  mongo_data:
