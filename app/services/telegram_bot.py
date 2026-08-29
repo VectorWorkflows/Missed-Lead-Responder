@@ -20,6 +20,11 @@ def get_telegram_app() -> Application:
 
 async def send_telegram_lead_alert(client_config: dict, lead_data: dict):
     """Sends a rich lead alert card to the owner's Telegram with 1-tap action buttons."""
+    # CRITICAL FIX: Safe exit if the database is completely empty
+    if not client_config:
+        print("⚠️ No client config found in database. Cannot send Telegram alert.")
+        return
+        
     chat_id = client_config.get("owner_telegram_chat_id")
     if not chat_id:
         print(f"⚠️ No Telegram chat ID configured for client {client_config.get('_id')}")
@@ -57,7 +62,6 @@ async def send_telegram_lead_alert(client_config: dict, lead_data: dict):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     try:
-        # 1. Send the text card with action buttons
         await app.bot.send_message(
             chat_id=chat_id,
             text=text,
@@ -66,12 +70,11 @@ async def send_telegram_lead_alert(client_config: dict, lead_data: dict):
         )
         print(f"📲 Telegram lead alert sent to owner (Chat ID: {chat_id})")
 
-        # 2. Securely download and send the voice note using HTTP Basic Auth
         if recording_url and recording_url != "N/A":
             clean_url = recording_url if recording_url.endswith(".mp3") else f"{recording_url}.mp3"
             auth = (settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
             
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 audio_res = await client.get(clean_url, auth=auth, follow_redirects=True)
                 if audio_res.status_code == 200:
                     await app.bot.send_voice(

@@ -34,7 +34,9 @@ def generate_ivr_twiml(action_url: str) -> str:
         voice="Polly.Amy",
         language="en-US"
     )
-    response.redirect(f"{action_url}?Digits=timeout", method="POST")
+    
+    # CRITICAL FIX: Use '&' instead of '?' so it doesn't mangle the caller ID
+    response.redirect(f"{action_url}&Digits=timeout", method="POST")
 
     return str(response)
 
@@ -58,6 +60,11 @@ def generate_voicemail_twiml(recording_action_url: str) -> str:
 
 async def send_custom_sms(client_config: dict, caller_phone: str, call_sid: str, message_body: str, lead_type: str = "IVR_INTERACTION"):
     """Sends a specific SMS payload and tracks it in MongoDB."""
+    # CRITICAL FIX: Safe exit if the database is empty
+    if not client_config or not client_config.get("twilio_number"):
+        print("⚠️ Missing database configuration or Twilio number. Cannot send SMS.")
+        return
+
     try:
         msg = twilio_client.messages.create(
             body=message_body,
