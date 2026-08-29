@@ -8,6 +8,15 @@ from app.services.telegram_bot import send_telegram_lead_alert
 
 router = APIRouter(prefix="/webhook", tags=["SMS"])
 
+def clean_phone_number(phone: str) -> str:
+    """Ensures phone number starts with a '+' and strips spaces."""
+    if not phone:
+        return ""
+    cleaned = phone.strip()
+    if not cleaned.startswith("+"):
+        cleaned = "+" + cleaned.lstrip("+")
+    return cleaned
+
 @router.post("/sms-inbound")
 async def handle_inbound_sms(
     background_tasks: BackgroundTasks,
@@ -16,11 +25,14 @@ async def handle_inbound_sms(
     Body: str = Form(...)
 ):
     """Triggered when a customer replies to our automated text."""
-    print(f"\n💬 Received SMS from {From}: '{Body}'")
+    caller = clean_phone_number(From)
+    twilio_num = clean_phone_number(To)
+
+    print(f"\n💬 Received SMS from {caller}: '{Body}'")
     
     # Find newest open lead for this caller
     lead = await leads_collection.find_one(
-        {"caller_phone": From, "twilio_number": To},
+        {"caller_phone": caller, "twilio_number": twilio_num},
         sort=[("call_time", -1)]
     )
     

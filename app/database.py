@@ -16,6 +16,7 @@ async def ping_database():
     """Helper function to test the database connection on startup."""
     try:
         await client.admin.command('ping')
+        print("✅ MongoDB connection successful!")
         return True
     except Exception as e:
         print(f"❌ MongoDB connection failed: {e}")

@@ -81,11 +81,9 @@ async def handle_ivr_action(
 
         encoded_caller = urllib.parse.quote_plus(caller)
         recording_action = f"https://lead.vectorworkflows.com/webhook/recording-status?client_id={client_id}&caller={encoded_caller}"
-        transcribe_action = f"https://lead.vectorworkflows.com/webhook/transcription-status?client_id={client_id}&caller={encoded_caller}"
         
         twiml = generate_voicemail_twiml(
-            recording_action_url=recording_action,
-            transcribe_callback_url=transcribe_action
+            recording_action_url=recording_action
         )
         return Response(content=twiml, media_type="application/xml")
 
@@ -156,45 +154,5 @@ async def handle_recording_status(
     if lead_data and client_config:
         background_tasks.add_task(send_telegram_lead_alert, client_config, lead_data)
         background_tasks.add_task(asyncio.to_thread, log_new_lead_reply, client_config, lead_data)
-
-    return Response(content="<Response></Response>", media_type="application/xml")
-
-
-@router.post("/transcription-status")
-async def handle_transcription_status(
-    client_id: str,
-    background_tasks: BackgroundTasks,
-    TranscriptionText: str = Form(None),
-    CallSid: str = Form(...)
-):
-    """Fired asynchronously by Twilio once the AI finishes processing the voice audio."""
-    if TranscriptionText:
-        print(f"📝 Received Voicemail Transcript for Call {CallSid}: \"{TranscriptionText}\"")
-        
-        await leads_collection.update_one(
-            {"call_sid": CallSid},
-            {"$set": {
-                "transcription": TranscriptionText,
-                "reply_text": f"🎙️ [Voicemail Transcript]: \"{TranscriptionText}\""
-            }}
-        )
-
-        client_config = await client_configs_collection.find_one({"_id": client_id})
-        lead_data = await leads_collection.find_one({"call_sid": CallSid})
-        
-        if client_config and lead_data:
-            # Drop the transcript in Google Sheets
-            background_tasks.add_task(asyncio.to_thread, log_new_lead_reply, client_config, lead_data)
-            
-            chat_id = client_config.get("owner_telegram_chat_id")
-            if chat_id:
-                app = get_telegram_app()
-                async def send_transcript_msg():
-                    await app.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"📝 *Voicemail Transcript ({lead_data.get('caller_phone')}):*\n\n_\"{TranscriptionText}\"_",
-                        parse_mode="Markdown"
-                    )
-                background_tasks.add_task(send_transcript_msg)
 
     return Response(content="<Response></Response>", media_type="application/xml")

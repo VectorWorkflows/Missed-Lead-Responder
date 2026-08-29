@@ -38,8 +38,8 @@ def generate_ivr_twiml(action_url: str) -> str:
 
     return str(response)
 
-def generate_voicemail_twiml(recording_action_url: str, transcribe_callback_url: str) -> str:
-    """Prompts caller to record a voicemail and triggers transcription."""
+def generate_voicemail_twiml(recording_action_url: str) -> str:
+    """Prompts caller to record a voicemail (Audio Only, No Transcription)."""
     response = VoiceResponse()
     response.say(
         "Please describe your project, problem, or workflow bottleneck after the tone. Press pound or hang up when finished.",
@@ -48,8 +48,6 @@ def generate_voicemail_twiml(recording_action_url: str, transcribe_callback_url:
     )
     response.record(
         action=recording_action_url,
-        transcribe=True,
-        transcribe_callback=transcribe_callback_url,
         max_length=120,
         finish_on_key="#",
         play_beep=True

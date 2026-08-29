@@ -39,7 +39,7 @@ def _ensure_headers(sheet):
     """Ensures the top row has the correct headers."""
     existing_headers = sheet.row_values(1)
     if not existing_headers or existing_headers[:6] != HEADER_ROW:
-        sheet.update(range_name="A1:F1", values=[HEADER_ROW])
+        sheet.update(range_name="A1:F1", values=[HEADER_ROW], value_input_option="USER_ENTERED")
 
 
 def log_new_lead_reply(client_config: dict, lead_data: dict):
@@ -66,10 +66,16 @@ def log_new_lead_reply(client_config: dict, lead_data: dict):
 
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
+        # SMART FIX: Safely append the audio link so it is clickable in the spreadsheet
+        reply_text = lead_data.get("reply_text", "")
+        recording_url = lead_data.get("recording_url")
+        if recording_url and recording_url != "N/A":
+            reply_text += f"\n\n🔗 Audio Link: {recording_url}"
+
         row_payload = [
             call_time_str,
             lead_data.get("caller_phone", ""),
-            lead_data.get("reply_text", ""),
+            reply_text,
             lead_data.get("owner_status", "NEW"),
             now_str,
             call_sid
@@ -81,10 +87,10 @@ def log_new_lead_reply(client_config: dict, lead_data: dict):
         if call_sid in call_sid_col:
             # Row index in sheet is 1-based (index + 1)
             row_idx = call_sid_col.index(call_sid) + 1
-            sheet.update(range_name=f"A{row_idx}:F{row_idx}", values=[row_payload])
+            sheet.update(range_name=f"A{row_idx}:F{row_idx}", values=[row_payload], value_input_option="USER_ENTERED")
             print(f"📊 Updated existing lead row {row_idx} for Call SID: {call_sid}")
         else:
-            sheet.append_row(row_payload)
+            sheet.append_row(row_payload, value_input_option="USER_ENTERED")
             print(f"📊 Appended new lead row for Call SID: {call_sid}")
 
     except Exception as e:
@@ -110,7 +116,7 @@ def update_sheet_status(client_config: dict, call_sid: str, new_status: str):
             now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             
             # Update Column D (Status) and Column E (Last Updated)
-            sheet.update(range_name=f"D{row_idx}:E{row_idx}", values=[[new_status, now_str]])
+            sheet.update(range_name=f"D{row_idx}:E{row_idx}", values=[[new_status, now_str]], value_input_option="USER_ENTERED")
             print(f"📊 Updated status to '{new_status}' in Google Sheet row {row_idx}")
         else:
             print(f"⚠️ Call SID {call_sid} not found in Google Sheet.")
