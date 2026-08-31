@@ -1,12 +1,32 @@
 # app/routes/sms.py
 import asyncio
+import os
 from datetime import datetime, timezone
-from fastapi import APIRouter, Form, Response, BackgroundTasks
+from fastapi import APIRouter, Form, Response, BackgroundTasks, Request, Depends, HTTPException
+from twilio.request_validator import RequestValidator
 from app.database import leads_collection, client_configs_collection
 from app.services.sheets_service import log_new_lead_reply
 from app.services.telegram_bot import send_telegram_lead_alert
 
 router = APIRouter(prefix="/webhook", tags=["SMS"])
+
+# --- SECURITY DEPENDENCY ---
+# Grabs the token directly from your environment variables
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+validator = RequestValidator(TWILIO_AUTH_TOKEN)
+
+async def verify_twilio_signature(request: Request):
+    signature = request.headers.get("X-Twilio-Signature", "")
+    form = await request.form()
+    
+    # Handle proxy/Nginx setups (Twilio uses https, but internal Docker might see http)
+    url = str(request.url)
+    if request.headers.get("X-Forwarded-Proto") == "https":
+        url = url.replace("http://", "https://")
+
+    if not validator.validate(url, dict(form), signature):
+        raise HTTPException(status_code=403, detail="Access Denied: Invalid Twilio Signature")
+# ---------------------------
 
 def clean_phone_number(phone: str) -> str:
     """Ensures phone number starts with a '+' and strips spaces."""
@@ -17,8 +37,10 @@ def clean_phone_number(phone: str) -> str:
         cleaned = "+" + cleaned.lstrip("+")
     return cleaned
 
-@router.post("/sms-inbound")
+# Notice the added dependencies=[Depends(verify_twilio_signature)]
+@router.post("/sms-inbound", dependencies=[Depends(verify_twilio_signature)])
 async def handle_inbound_sms(
+    request: Request,
     background_tasks: BackgroundTasks,
     From: str = Form(...),
     To: str = Form(...),

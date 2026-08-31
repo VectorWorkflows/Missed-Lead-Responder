@@ -1,7 +1,9 @@
 # app/routes/voice.py
 import urllib.parse
 import asyncio
-from fastapi import APIRouter, Form, Response, BackgroundTasks, Request
+import os
+from fastapi import APIRouter, Form, Response, BackgroundTasks, Request, Depends, HTTPException
+from twilio.request_validator import RequestValidator
 from app.database import client_configs_collection, leads_collection
 from app.services.twilio_service import (
     generate_ivr_twiml,
@@ -18,6 +20,24 @@ router = APIRouter(prefix="/webhook", tags=["Voice"])
 CALCOM_URL = "https://cal.com/vectorworkflows/meeting-for-caller"
 TALLY_URL = "https://tally.so/r/0QRgZN"
 
+# --- SECURITY DEPENDENCY ---
+# Grabs the token directly from your environment variables
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+validator = RequestValidator(TWILIO_AUTH_TOKEN)
+
+async def verify_twilio_signature(request: Request):
+    signature = request.headers.get("X-Twilio-Signature", "")
+    form = await request.form()
+    
+    # Handle proxy/Nginx setups (Twilio uses https, but internal Docker might see http)
+    url = str(request.url)
+    if request.headers.get("X-Forwarded-Proto") == "https":
+        url = url.replace("http://", "https://")
+
+    if not validator.validate(url, dict(form), signature):
+        raise HTTPException(status_code=403, detail="Access Denied: Invalid Twilio Signature")
+# ---------------------------
+
 def clean_phone_number(phone: str) -> str:
     if not phone:
         return ""
@@ -26,7 +46,9 @@ def clean_phone_number(phone: str) -> str:
         cleaned = "+" + cleaned.lstrip("+")
     return cleaned
 
-@router.post("/voice")
+# Notice the added dependencies=[Depends(verify_twilio_signature)] on every route!
+
+@router.post("/voice", dependencies=[Depends(verify_twilio_signature)])
 async def handle_incoming_call(
     request: Request,
     From: str = Form(...),
@@ -46,8 +68,9 @@ async def handle_incoming_call(
     twiml = generate_ivr_twiml(action_url=action_url)
     return Response(content=twiml, media_type="application/xml")
 
-@router.post("/ivr-action")
+@router.post("/ivr-action", dependencies=[Depends(verify_twilio_signature)])
 async def handle_ivr_action(
+    request: Request,
     client_id: str,
     caller: str,
     background_tasks: BackgroundTasks,
@@ -129,8 +152,9 @@ async def handle_ivr_action(
 
     return Response(content=str(response), media_type="application/xml")
 
-@router.post("/recording-status")
+@router.post("/recording-status", dependencies=[Depends(verify_twilio_signature)])
 async def handle_recording_status(
+    request: Request,
     client_id: str,
     caller: str,
     background_tasks: BackgroundTasks,
