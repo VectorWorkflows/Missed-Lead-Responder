@@ -47,6 +47,12 @@ def log_new_lead_reply(client_config: dict, lead_data: dict):
     Appends or updates the lead row in Google Sheets when a reply comes in.
     Keyed by Call SID in Column F to prevent duplicate rows.
     """
+    # --- ADDED SAFETY NET ---
+    if not client_config:
+        print("⚠️ No client config found in database. Cannot sync to Google Sheets.")
+        return
+    # ------------------------
+
     sheet_id = client_config.get("google_sheet_id")
     if not sheet_id or sheet_id == "placeholder_sheet_id":
         print(f"⚠️ No valid Google Sheet ID configured for client {client_config.get('_id')}")
@@ -102,6 +108,11 @@ def update_sheet_status(client_config: dict, call_sid: str, new_status: str):
     Finds the row matching call_sid and updates Column D (Status) and Column E (Last Updated).
     Used by the Telegram bot callback handler.
     """
+    # --- ADDED SAFETY NET ---
+    if not client_config:
+        return
+    # ------------------------
+
     sheet_id = client_config.get("google_sheet_id")
     if not sheet_id:
         return
