@@ -4,13 +4,24 @@ from app.database import client_configs_collection
 
 async def add_client():
     print("\n--- 🏢 ONBOARD NEW CLIENT ---")
-    client_id = input("Unique Client ID (e.g. client_apex_plumbing): ").strip()
+    client_id = input("Unique Client ID (e.g. vector_workflows): ").strip()
     business_name = input("Business Name: ").strip()
     twilio_number = input("Twilio Virtual Number (e.g. +12125550199): ").strip()
     owner_phone = input("Owner's Real Cell Phone (e.g. +919876543210): ").strip()
-    telegram_id = int(input("Owner's Telegram Chat ID: ").strip())
+    
+    try:
+        telegram_id = int(input("Owner's Telegram Chat ID: ").strip())
+    except ValueError:
+        print("❌ Invalid Telegram ID. Must be numbers only.")
+        return
+
     sheet_id = input("Google Sheet ID: ").strip()
-    timezone = input("Client Timezone (default 'Asia/Kolkata' or 'America/New_York'): ").strip() or "Asia/Kolkata"
+    
+    # --- NEW DYNAMIC FIELDS ---
+    booking_url = input("Booking URL (e.g. https://cal.com/...): ").strip()
+    intake_url = input("Intake Form URL (e.g. https://tally.so/...): ").strip()
+    
+    timezone = input("Client Timezone (default 'Asia/Kolkata'): ").strip() or "Asia/Kolkata"
     
     initial_template = (
         input("Initial SMS Template [Press Enter for default]: ").strip() 
@@ -24,6 +35,8 @@ async def add_client():
         "owner_forwarding_phone": owner_phone,
         "owner_telegram_chat_id": telegram_id,
         "google_sheet_id": sheet_id,
+        "booking_url": booking_url,
+        "intake_form_url": intake_url,
         "initial_sms_template": initial_template,
         "followup_sms_template": "Just checking in from {business_name} — did you still need help?",
         "timezone": timezone,

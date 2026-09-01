@@ -1,9 +1,9 @@
 # app/routes/sms.py
 import asyncio
-import os
 from datetime import datetime, timezone
 from fastapi import APIRouter, Form, Response, BackgroundTasks, Request, Depends, HTTPException
 from twilio.request_validator import RequestValidator
+from app.config import settings
 from app.database import leads_collection, client_configs_collection
 from app.services.sheets_service import log_new_lead_reply
 from app.services.telegram_bot import send_telegram_lead_alert
@@ -11,8 +11,8 @@ from app.services.telegram_bot import send_telegram_lead_alert
 router = APIRouter(prefix="/webhook", tags=["SMS"])
 
 # --- SECURITY DEPENDENCY ---
-# Grabs the token directly from your environment variables
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+# Now securely pulled from our centralized config
+TWILIO_AUTH_TOKEN = settings.TWILIO_AUTH_TOKEN
 validator = RequestValidator(TWILIO_AUTH_TOKEN)
 
 async def verify_twilio_signature(request: Request):
@@ -37,7 +37,7 @@ def clean_phone_number(phone: str) -> str:
         cleaned = "+" + cleaned.lstrip("+")
     return cleaned
 
-# Notice the added dependencies=[Depends(verify_twilio_signature)]
+
 @router.post("/sms-inbound", dependencies=[Depends(verify_twilio_signature)])
 async def handle_inbound_sms(
     request: Request,
@@ -52,7 +52,7 @@ async def handle_inbound_sms(
 
     print(f"\n💬 Received SMS from {caller}: '{Body}'")
     
-    # Find newest open lead for this caller
+    # Find newest open lead for this caller AND this specific client's Twilio number
     lead = await leads_collection.find_one(
         {"caller_phone": caller, "twilio_number": twilio_num},
         sort=[("call_time", -1)]
@@ -70,13 +70,13 @@ async def handle_inbound_sms(
         )
         print(f"✅ Lead {lead['call_sid']} updated with customer reply in MongoDB.")
 
-        # Fetch client config
+        # Fetch client config dynamically
         client_config = await client_configs_collection.find_one({"_id": lead["client_id"]})
         
         if client_config:
             updated_lead = {**lead, "reply_text": Body, "customer_replied": True}
             
-            # 1. Sync to Google Sheets
+            # 1. Sync to Google Sheets (Now uses dynamic timezone)
             background_tasks.add_task(
                 asyncio.to_thread,
                 log_new_lead_reply,
@@ -84,7 +84,7 @@ async def handle_inbound_sms(
                 updated_lead
             )
             
-            # 2. Push Instant Alert to Telegram Owner
+            # 2. Push Instant Alert to Telegram Owner (Now uses dynamic timezone)
             background_tasks.add_task(
                 send_telegram_lead_alert,
                 client_config,

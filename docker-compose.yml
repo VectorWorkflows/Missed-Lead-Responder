@@ -1,17 +1,21 @@
 version: '3.8'
 
+# 1. Hardcode the project name so it ignores the folder name
+name: missed-lead-responder-app
+
 services:
   # 1. MongoDB Service
   mongo:
     image: mongo:6.0
     container_name: lead_responder_db
     restart: always
-    volumes:
-      - mongo_data:/data/db
     ports:
       - "27017:27017"
     environment:
       - MONGO_INITDB_DATABASE=missed_call_responder
+    # THIS SAVES YOUR DATA:
+    volumes:
+      - mongo_data:/data/db
 
   # 2. FastAPI Lead Responder App
   app:
@@ -28,5 +32,7 @@ services:
     ports:
       - "8005:8000"
 
+# THIS LOCKS THE VOLUME TO YOUR SERVER'S HARD DRIVE:
 volumes:
   mongo_data:
+    name: lead_responder_persistent_db

@@ -1,6 +1,7 @@
 # app/services/telegram_bot.py
 import asyncio
 import httpx
+import zoneinfo
 from datetime import datetime, timezone
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes
@@ -20,7 +21,6 @@ def get_telegram_app() -> Application:
 
 async def send_telegram_lead_alert(client_config: dict, lead_data: dict):
     """Sends a rich lead alert card to the owner's Telegram with 1-tap action buttons."""
-    # CRITICAL FIX: Safe exit if the database is completely empty
     if not client_config:
         print("⚠️ No client config found in database. Cannot send Telegram alert.")
         return
@@ -37,11 +37,22 @@ async def send_telegram_lead_alert(client_config: dict, lead_data: dict):
     reply = lead_data.get("reply_text", "")
     recording_url = lead_data.get("recording_url")
 
+    # --- DYNAMIC TIMEZONE FIX ---
     call_time = lead_data.get("call_time")
+    client_tz_str = client_config.get("timezone", "UTC")
+    
     if isinstance(call_time, datetime):
-        time_str = call_time.strftime("%I:%M %p UTC")
+        try:
+            # Convert UTC database time to the client's local timezone
+            client_tz = zoneinfo.ZoneInfo(client_tz_str)
+            local_time = call_time.astimezone(client_tz)
+            time_str = local_time.strftime("%I:%M %p %Z")
+        except Exception as e:
+            print(f"⚠️ Timezone conversion error: {e}. Falling back to UTC.")
+            time_str = call_time.strftime("%I:%M %p UTC")
     else:
         time_str = str(call_time or "")
+    # ----------------------------
 
     text = (
         f"🚨 *NEW MISSED-CALL LEAD*\n\n"

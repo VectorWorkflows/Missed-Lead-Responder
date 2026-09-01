@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 twilio_client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
 
-def generate_ivr_twiml(action_url: str) -> str:
+def generate_ivr_twiml(action_url: str, business_name: str = "our team") -> str:
     """Generates the interactive IVR menu with DTMF digit capture."""
     response = VoiceResponse()
 
@@ -18,12 +18,13 @@ def generate_ivr_twiml(action_url: str) -> str:
         timeout=6
     )
     
+    # Dynamic greeting injected with the specific client's business name
     gather.say(
-        "Thanks for calling Vector Workflows! We build custom AI and operational automations for modern service businesses. "
-        "Press 1 to leave a voice description of your problem. "
-        "Press 2 to receive an instant SMS link to our intake form. "
-        "Press 3 to get our calendar link and book a 15-minute workflow audit. "
-        "If you'd rather not press anything, stay on the line and we'll text you all the links automatically.",
+        f"Thanks for calling {business_name}! "
+        "Press 1 to leave a brief voicemail about how we can help you. "
+        "Press 2 to receive a text with a link to our intake form. "
+        "Press 3 to receive a text with a link to book a meeting on our calendar. "
+        "If you'd rather not press anything, stay on the line and we will text you all of our links automatically.",
         voice="Polly.Amy",
         language="en-US"
     )
@@ -40,11 +41,12 @@ def generate_ivr_twiml(action_url: str) -> str:
 
     return str(response)
 
+
 def generate_voicemail_twiml(recording_action_url: str) -> str:
     """Prompts caller to record a voicemail (Audio Only, No Transcription)."""
     response = VoiceResponse()
     response.say(
-        "Please describe your project, problem, or workflow bottleneck after the tone. Press pound or hang up when finished.",
+        "Please leave your message after the tone. Press pound or hang up when you are finished.",
         voice="Polly.Amy",
         language="en-US"
     )
@@ -57,6 +59,7 @@ def generate_voicemail_twiml(recording_action_url: str) -> str:
     response.say("Thank you, we received your recording. We will be in touch shortly!", voice="Polly.Amy")
     response.hangup()
     return str(response)
+
 
 async def send_custom_sms(client_config: dict, caller_phone: str, call_sid: str, message_body: str, lead_type: str = "IVR_INTERACTION"):
     """Sends a specific SMS payload and tracks it in MongoDB."""

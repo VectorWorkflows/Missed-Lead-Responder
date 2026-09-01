@@ -1,6 +1,8 @@
 # app/main.py
+import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from app.config import settings
 from app.routes import voice, sms
 from app.services.telegram_bot import get_telegram_app
 from app.database import ping_database
@@ -36,3 +38,8 @@ app.include_router(sms.router)
 @app.get("/")
 async def root():
     return {"status": "online", "message": "Missed-Call Responder API is running."}
+
+# --- CRITICAL FIX FOR DOCKER ---
+if __name__ == "__main__":
+    # Host must be 0.0.0.0 to expose it outside the Docker container
+    uvicorn.run("app.main:app", host="0.0.0.0", port=settings.PORT, reload=False)

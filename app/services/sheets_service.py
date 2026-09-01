@@ -1,6 +1,7 @@
 # app/services/sheets_service.py
 import base64
 import json
+import zoneinfo
 from datetime import datetime, timezone
 import gspread
 from google.oauth2.service_account import Credentials
@@ -47,16 +48,23 @@ def log_new_lead_reply(client_config: dict, lead_data: dict):
     Appends or updates the lead row in Google Sheets when a reply comes in.
     Keyed by Call SID in Column F to prevent duplicate rows.
     """
-    # --- ADDED SAFETY NET ---
     if not client_config:
         print("⚠️ No client config found in database. Cannot sync to Google Sheets.")
         return
-    # ------------------------
 
     sheet_id = client_config.get("google_sheet_id")
     if not sheet_id or sheet_id == "placeholder_sheet_id":
         print(f"⚠️ No valid Google Sheet ID configured for client {client_config.get('_id')}")
         return
+
+    # --- DYNAMIC TIMEZONE SETUP ---
+    client_tz_str = client_config.get("timezone", "UTC")
+    try:
+        client_tz = zoneinfo.ZoneInfo(client_tz_str)
+    except Exception as e:
+        print(f"⚠️ Timezone error: {e}. Defaulting to UTC.")
+        client_tz = timezone.utc
+    # ------------------------------
 
     try:
         gc = get_sheets_client()
@@ -64,19 +72,23 @@ def log_new_lead_reply(client_config: dict, lead_data: dict):
         _ensure_headers(sheet)
 
         call_sid = lead_data.get("call_sid")
+        
+        # Convert call time to local timezone
         call_time = lead_data.get("call_time")
         if isinstance(call_time, datetime):
-            call_time_str = call_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+            call_time_str = call_time.astimezone(client_tz).strftime("%Y-%m-%d %I:%M:%S %p %Z")
         else:
             call_time_str = str(call_time or "")
 
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        # Convert 'Last Updated' to local timezone
+        now_str = datetime.now(timezone.utc).astimezone(client_tz).strftime("%Y-%m-%d %I:%M:%S %p %Z")
 
-        # SMART FIX: Safely append the audio link so it is clickable in the spreadsheet
+        # Safely append the audio link so it is clickable in the spreadsheet
         reply_text = lead_data.get("reply_text", "")
         recording_url = lead_data.get("recording_url")
         if recording_url and recording_url != "N/A":
-            reply_text += f"\n\n🔗 Audio Link: {recording_url}"
+            clean_url = recording_url if recording_url.endswith(".mp3") else f"{recording_url}.mp3"
+            reply_text += f"\n\n🔗 Audio Link: {clean_url}"
 
         row_payload = [
             call_time_str,
@@ -108,14 +120,20 @@ def update_sheet_status(client_config: dict, call_sid: str, new_status: str):
     Finds the row matching call_sid and updates Column D (Status) and Column E (Last Updated).
     Used by the Telegram bot callback handler.
     """
-    # --- ADDED SAFETY NET ---
     if not client_config:
         return
-    # ------------------------
 
     sheet_id = client_config.get("google_sheet_id")
     if not sheet_id:
         return
+
+    # --- DYNAMIC TIMEZONE SETUP ---
+    client_tz_str = client_config.get("timezone", "UTC")
+    try:
+        client_tz = zoneinfo.ZoneInfo(client_tz_str)
+    except Exception:
+        client_tz = timezone.utc
+    # ------------------------------
 
     try:
         gc = get_sheets_client()
@@ -124,7 +142,9 @@ def update_sheet_status(client_config: dict, call_sid: str, new_status: str):
         call_sid_col = sheet.col_values(CALL_SID_COL_INDEX)
         if call_sid in call_sid_col:
             row_idx = call_sid_col.index(call_sid) + 1
-            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            
+            # Format update time to local timezone
+            now_str = datetime.now(timezone.utc).astimezone(client_tz).strftime("%Y-%m-%d %I:%M:%S %p %Z")
             
             # Update Column D (Status) and Column E (Last Updated)
             sheet.update(range_name=f"D{row_idx}:E{row_idx}", values=[[new_status, now_str]], value_input_option="USER_ENTERED")
