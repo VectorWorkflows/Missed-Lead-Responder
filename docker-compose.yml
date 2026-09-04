@@ -1,38 +1,52 @@
-version: '3.8'
+# docker-compose.yml
+#
+# ATLAS-ONLY. The local mongo service is gone on purpose.
+#
+# Two things went wrong with it:
+#   1. `environment:` set MONGO_URI and silently overrode the value in .env,
+#      so the app read an empty local database while manage_clients.py wrote to
+#      Atlas. That single line caused every symptom this project ever had.
+#   2. It published 27017 on 0.0.0.0 with no password. A bot found it and wiped
+#      the databases, leaving a ransom note.
+#
+# Both problems disappear when there is no local mongo. Your data already lives
+# in Atlas, which is authenticated, backed up, and not your responsibility to
+# patch. MONGO_URI in .env is now the ONLY place the database is chosen.
 
-# 1. Hardcode the project name so it ignores the folder name
 name: missed-lead-responder-app
 
 services:
-  # 1. MongoDB Service
-  mongo:
-    image: mongo:6.0
-    container_name: lead_responder_db
-    restart: always
-    ports:
-      - "27017:27017"
-    environment:
-      - MONGO_INITDB_DATABASE=missed_call_responder
-    # THIS SAVES YOUR DATA:
-    volumes:
-      - mongo_data:/data/db
-
-  # 2. FastAPI Lead Responder App
   app:
     build: .
     container_name: lead_responder_app
-    restart: always
-    depends_on:
-      - mongo
+    restart: unless-stopped
     env_file:
       - .env
     environment:
-      - MONGO_URI=mongodb://mongo:27017/missed_call_responder
+      # Nothing here may duplicate a key in .env. Anything listed here WINS,
+      # silently. That is the trap. Keep this block to values that genuinely
+      # belong to the container rather than to your configuration.
       - PORT=8000
+      - DATA_DIR=/data
+    volumes:
+      # Durable outbox queue + client config snapshot. Without this volume a
+      # redeploy drops any work that was mid-retry, and the offline fallback
+      # loses its last-known-good client list.
+      - app_data:/data
     ports:
-      - "8005:8000"
+      # Bound to localhost only: Caddy reverse-proxies to it, so it never needs
+      # to be reachable from the internet directly.
+      - "127.0.0.1:8005:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=5).status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "5"}
 
-# THIS LOCKS THE VOLUME TO YOUR SERVER'S HARD DRIVE:
 volumes:
-  mongo_data:
-    name: lead_responder_persistent_db
+  app_data:
+    name: lead_responder_app_data

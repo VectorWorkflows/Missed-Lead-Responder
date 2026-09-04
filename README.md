@@ -28,7 +28,7 @@
 
 <br />
 
-`missed call` → `texted in seconds` → `reply logged` → `owner pinged` → `1 tap to close it out`
+`call answered` → `menu, or hang up` → `texted in seconds` → `logged` → `owner pinged` → `1 tap to close it out`
 
 <br />
 
@@ -38,19 +38,19 @@
 
 ## ▍ The problem this exists to kill
 
-A customer calls. Nobody picks up. They don't leave a voicemail — almost nobody does anymore — they just hang up and call the next business on the list.
+A customer calls. Nobody picks up. They don't leave a voicemail — almost nobody does anymore — they hang up and call the next business on the list.
 
-That's the entire transaction. No error, no crash, nothing to debug. The lead was real, the intent was real, and it evaporated in the eleven seconds it took the phone to stop ringing. Multiply that by every missed call a small business gets during a job, a lunch break, or after hours, and it's not a minor inconvenience — it's one of the largest silent revenue leaks most service businesses have.
+That's the entire transaction. No error, no crash, nothing to debug. The lead was real, the intent was real, and it evaporated in the eleven seconds it took the phone to stop ringing.
 
-**This system's entire reason for existing is to close that window before it closes.**
+**This system's reason for existing is to close that window before it closes.**
 
 <br />
 
 ## ▍ What it actually does
 
-The moment a call goes unanswered, a text is already on its way to the caller before they've had time to put the phone down. If they text back, the owner doesn't have to go check anything — a fully-formed lead card lands in their Telegram with the caller's number, the time, and what they said, and **closing the loop out is a single tap.** Meanwhile, every lead is quietly building itself a row in a Google Sheet the owner already knows how to read, with zero manual data entry, ever.
+Every call is answered instantly by an IVR that greets the caller by business name and offers three options. Whatever they do next — press a key, leave a voicemail, or hang up two seconds in — a lead exists, a text goes out, a Telegram card lands on the owner's phone, and a row appears in their Google Sheet.
 
-Nobody has to open an app. Nobody has to remember to log anything. The business owner's entire experience of this system is: *phone rings, phone is missed, a card appears on Telegram moments later, tap a button when it's handled.*
+Closing the loop is one tap.
 
 <br />
 
@@ -62,87 +62,72 @@ Nobody has to open an app. Nobody has to remember to log anything. The business 
    📞 CUSTOMER CALLS THE BUSINESS NUMBER
               │
               ▼
-   ┌──────────────────────────┐
-   │   TWILIO VOICE WEBHOOK     │   looks up the dialed number against
-   │      /webhook/voice        │   client_configs → forwards the call
-   └──────────────────────────┘   to the owner's real cell phone
+   ┌────────────────────────────┐
+   │   /webhook/voice            │  client config resolved from an in-memory
+   │   answers immediately       │  cache — never a live DB call on this path
+   │   LEAD CREATED RIGHT HERE   │
+   └────────────────────────────┘
               │
               ▼
-        rings for 20s...
+      IVR menu is spoken
               │
-      ┌───────┴────────┐
-      ▼                ▼
-  ANSWERED          NO-ANSWER / BUSY / FAILED
-  (call ends,       │
-   nothing to do)   ▼
-             ┌──────────────────────────┐
-             │   /webhook/voice-status    │  →  lead written to MongoDB
-             │   "missed call detected"   │      (status: NEW)
-             └──────────────────────────┘
-                          │
-                          ▼
-             ┌──────────────────────────┐
-             │   AUTO-REPLY SMS FIRED     │  →  fires in the background,
-             │   via Twilio, in seconds   │      never blocks the webhook
-             └──────────────────────────┘
-                          │
-              customer texts back
-                          │
-                          ▼
-             ┌──────────────────────────┐
-             │   /webhook/sms-inbound     │  →  matched to the open lead
-             │   "reply received"         │      by phone number
-             └──────────────────────────┘
-                    │             │
-                    ▼             ▼
-         ┌────────────────┐  ┌──────────────────────┐
-         │ GOOGLE SHEETS    │  │  TELEGRAM LEAD CARD   │
-         │ row appended /   │  │  🚨 caller · time ·    │
-         │ updated by       │  │  reply · 3 buttons:   │
-         │ Call SID         │  │  📞 ✅ ❌              │
-         └────────────────┘  └──────────────────────┘
-                                        │
-                                owner taps ONE button
-                                        │
-                                        ▼
-                         ┌───────────────────────────────┐
-                         │ MongoDB status updated  +       │
-                         │ Google Sheet cell updated  +    │
-                         │ Telegram message edits in-place │
-                         │        all three, instantly     │
-                         └───────────────────────────────┘
+    ┌─────────┼─────────┬──────────────┐
+    ▼         ▼         ▼              ▼
+  PRESS 1   PRESS 2   PRESS 3      HANGS UP / stays on line
+  voicemail  intake   booking      │
+    │         link      link       ▼
+    │         │         │     ┌──────────────────────┐
+    │         │         │     │ /webhook/call-status  │
+    │         │         │     │ "abandoned" → LEAD    │
+    │         │         │     └──────────────────────┘
+    └─────────┴────┬────┴──────────────┘
+                   ▼
+        ┌──────────────────────────┐
+        │   DURABLE OUTBOX (SQLite) │  every side effect is written to disk
+        │   retries w/ backoff      │  BEFORE it is attempted
+        └──────────────────────────┘
+             │        │         │
+             ▼        ▼         ▼
+        ┌────────┐ ┌────────┐ ┌──────────────┐
+        │  SMS   │ │ SHEETS │ │ TELEGRAM CARD │
+        │ Twilio │ │  row   │ │ 📞 ✅ ❌       │
+        └────────┘ └────────┘ └──────────────┘
+                                     │
+                            owner taps ONE button
+                                     ▼
+                    ┌────────────────────────────────┐
+                    │ MongoDB + Google Sheet + the     │
+                    │ Telegram message itself, all     │
+                    │ updated in one motion            │
+                    └────────────────────────────────┘
+
+        customer texts back at any point
+                   │
+                   ▼
+        ┌──────────────────────────┐
+        │  /webhook/sms-inbound     │  matched to a lead within 14 days,
+        │  (or creates a new lead)  │  or logged as a fresh SMS-only lead
+        └──────────────────────────┘
 ```
 
 </div>
 
 <br />
 
-## ▍ Anatomy of a save
+## ▍ Built so it cannot quietly fail
 
-**T+0s** — A customer calls. Twilio hits `/webhook/voice`, the system matches the dialed number to a business in `client_configs`, and dials the owner's real phone. If the number isn't registered, the call is rejected outright — no orphaned calls, no ambiguity.
-
-**T+20s** — Nobody picks up. Twilio calls back into `/webhook/voice-status` with the outcome. Anything that isn't a clean answer — `no-answer`, `busy`, `failed`, `canceled` — is treated as a missed call. A lead document is born in MongoDB with a full lifecycle of flags already primed: `initial_sms_sent`, `followup_sms_sent`, `customer_replied`, `owner_status`, `owner_reminder_sent`.
-
-**T+21s** — Before that request has even finished, a `BackgroundTask` fires the auto-reply SMS through Twilio, templated per-business (`"{business_name}"` swapped in live) so every client's bot sounds like *their* business, not a generic script.
-
-**T+ a few minutes** — The customer texts back. `/webhook/sms-inbound` finds their most recent open lead by phone number, stamps `customer_replied: true` and the reply text into Mongo, and kicks off two background jobs in parallel:
-
-- a thread-safe `gspread` write that either appends a new row or **updates the existing one in place**, keyed by `Call SID` so a single lead never becomes duplicate rows no matter how many times it changes state;
-- a rich Telegram card to the owner — caller number, missed time, and the customer's exact reply, with three inline buttons baked right into the message.
-
-**T+ one tap** — The owner taps **📞 Contacted**, **✅ Booked**, or **❌ Lost**. That single tap updates the MongoDB record, rewrites the status cell in the Sheet, *and* edits the original Telegram message in place to show the new status — three systems, one motion, zero context-switching.
-
-<br />
-
-## ▍ Design decisions worth recording
+This is the part that matters more than the features. Every one of these exists because the naive version of it broke in production.
 
 <table>
-<tr><td width="30%"><b>Multi-tenant from day one</b></td><td>Every Twilio number, forwarding phone, SMS template, Sheet ID, and Telegram chat ID lives in a per-client <code>client_configs</code> document. The same deployment can run an unlimited number of businesses side-by-side without touching code.</td></tr>
-<tr><td><b>Webhooks never wait on the slow part</b></td><td>SMS sends, Sheets writes, and Telegram pushes are <i>all</i> dispatched via <code>BackgroundTasks</code> (and <code>asyncio.to_thread</code> for the blocking <code>gspread</code> calls). Twilio always gets an instant, empty <code>&lt;Response/&gt;</code> — no webhook ever risks a timeout retry storm.</td></tr>
-<tr><td><b>Call SID as the anchor, everywhere</b></td><td>MongoDB, Google Sheets, and Telegram's callback payloads are all keyed off the same Twilio Call SID. It's the one identifier that's guaranteed unique and present at every stage, so nothing ever gets double-logged or cross-wired between leads.</td></tr>
-<tr><td><b>Idempotent sheet writes</b></td><td><code>log_new_lead_reply</code> reads column F before writing — if the Call SID already has a row, it updates in place instead of appending. The sheet a business owner opens is always the current truth, never a growing pile of duplicates.</td></tr>
-<tr><td><b>One-tap resolution, not a dashboard</b></td><td>No login, no app, no separate CRM UI for the owner to check. The entire "close this lead out" action is three buttons under a message that was already pushed to their phone.</td></tr>
-<tr><td><b>Reject unknown numbers outright</b></td><td>If a call lands on a Twilio number with no matching (or inactive) <code>client_config</code>, the call is rejected at the TwiML layer before any logic runs — a clean, deliberate failure mode instead of a silent one.</td></tr>
+<tr><td width="32%"><b>The IVR never depends on a live database</b></td><td>Client config resolves through four tiers: in-memory cache → live Mongo read → on-disk JSON snapshot → environment-variable fallback. The database can be entirely gone and the caller still hears a correct, branded menu with working links. There is no infrastructure failure that produces <i>"this number is currently unavailable."</i></td></tr>
+<tr><td><b>Durable outbox, not fire-and-forget</b></td><td>Every SMS, Telegram card, Sheets write and lead record is written to a local SQLite queue <i>first</i>, then dispatched by a background worker with exponential backoff out to ~24 hours. Google can 429 you, Telegram can go down, Mongo can restart — nothing is lost, it just drains late. The queue lives on a mounted volume, so a redeploy doesn't drop work mid-retry.</td></tr>
+<tr><td><b>The lead is created before the greeting finishes</b></td><td>Not after the caller navigates the menu. Someone who hangs up three seconds in is the most common real-world case and the most valuable one to catch — a <code>statusCallback</code> converts that abandonment into a lead with an SMS and an alert.</td></tr>
+<tr><td><b>Idempotency keys on every job</b></td><td>Voicemail fires two Twilio webhooks for the same recording. Retries re-run jobs. Every queued item carries a unique key, so the owner gets exactly one card per event — never a duplicate, never a missing one.</td></tr>
+<tr><td><b>HTML-escaped Telegram output</b></td><td>Customer text goes through <code>html.escape</code> before it reaches Telegram. Legacy Markdown mode rejects any message containing <code>_</code>, <code>*</code> or <code>[</code> — meaning a perfectly ordinary customer text silently destroyed the alert.</td></tr>
+<tr><td><b>Webhooks never block on slow work</b></td><td>Twilio gets its TwiML in milliseconds. Blocking calls (<code>gspread</code>, Twilio's REST client) run in threads, never on the event loop.</td></tr>
+<tr><td><b>Errors degrade into speech, not silence</b></td><td>An unhandled exception on a voice route returns a polite spoken message instead of Twilio's <i>"an application error has occurred"</i> — and pings the operator on Telegram at the same time.</td></tr>
+<tr><td><b>Self-monitoring with a daily heartbeat</b></td><td>A watchdog reports queue backlogs, dead-lettered jobs, degraded config and zero-client states. A 9am heartbeat reports the last 24 hours. Silence becomes meaningful: no heartbeat means something is wrong.</td></tr>
+<tr><td><b>One source of truth for config</b></td><td><code>MONGO_URI</code> is set in exactly one place. The original compose file set it in both <code>env_file</code> and <code>environment</code>, and Compose's precedence rules meant the app silently used a different database than the onboarding script — the single defect behind every symptom this system ever had.</td></tr>
 </table>
 
 <br />
@@ -152,20 +137,28 @@ Nobody has to open an app. Nobody has to remember to log anything. The business 
 <table>
 <tr><td width="50%" valign="top">
 
-**`leads`** — one document per missed call
+**`leads`** — one document per call or cold text
 
 ```
-client_id             → which business
-caller_phone           → who called
-twilio_number           → which line they dialed
-call_sid                → the anchor key, everywhere
-call_time                → when it rang
-call_status               → no-answer / busy / failed
-initial_sms_sent           → auto-reply fired?
-customer_replied            → did they text back?
-reply_text                    → what they said
-owner_status                    → NEW / CONTACTED / BOOKED / LOST
-owner_reminder_sent               → nudge the owner? (in progress)
+client_id              → which business
+caller_phone            → who called
+twilio_number            → which line they dialled
+call_sid                  → the anchor key, everywhere
+call_time                  → when it rang
+call_status                 → RINGING / IVR_COMPLETED /
+                               VOICEMAIL_RECEIVED /
+                               ABANDONED / SMS_ONLY
+ivr_selection                 → 1, 2, 3, none
+initial_sms_sent               → auto-reply fired?
+followup_sms_sent               → nudge sent?
+customer_replied                 → did they text back?
+reply_text                        → latest message
+messages[]                         → full conversation
+recording_url                       → voicemail audio
+owner_status                         → NEW / CONTACTED /
+                                        BOOKED / LOST
+owner_reminder_sent                   → nudged the owner?
+alerted                                → card delivered?
 ```
 
 </td><td width="50%" valign="top">
@@ -173,44 +166,34 @@ owner_reminder_sent               → nudge the owner? (in progress)
 **`client_configs`** — one document per business
 
 ```
-twilio_number            → their public number
-owner_forwarding_phone     → their real cell
-owner_telegram_chat_id       → where alerts land
-business_name                  → for the SMS template
-initial_sms_template             → their custom auto-reply
-google_sheet_id                    → their live lead log
-active                                → kill switch, per client
+_id                     → client slug
+business_name            → spoken in the greeting
+twilio_number             → their public number
+owner_telegram_chat_id     → where alerts land
+google_sheet_id             → their live lead log
+booking_url                  → sent on "3"
+intake_form_url               → sent on "2"
+followup_sms_template          → the 2-hour nudge
+timezone                        → per-client local time
+active                           → kill switch
 ```
+
+Unique index on `call_sid`; compound indexes for the
+inbound-SMS lookup and both scheduler queries.
 
 </td></tr>
 </table>
 
 <br />
 
-## ▍ How this actually got built
+## ▍ Scheduled jobs
 
-No sprint planning, no ticket board — just a straight, sequential build, one working system stacked on the last. The commit history *is* the changelog:
-
-<table>
-<tr><td width="16%"><code>a54b650</code></td><td>Folder structure, skeleton, day one.</td></tr>
-<tr><td><code>ae85dac</code></td><td>MongoDB wired up and tested before a single webhook existed.</td></tr>
-<tr><td><code>6a31411</code></td><td>Twilio credentials in place — the system can finally text a human.</td></tr>
-<tr><td><code>fac997f</code></td><td>Inbound reply capture — now it can <i>listen</i>, not just talk.</td></tr>
-<tr><td><code>2b83e32</code></td><td>Google Sheets connected — every reply becomes a durable row.</td></tr>
-<tr><td><code>2628dbb</code></td><td>Telegram alerts added — the owner stops needing to check anything.</td></tr>
-<tr><td><code>4326d17</code></td><td><b>"Completed the loop, all the apps integrated and tested."</b></td></tr>
-</table>
-
-<br />
-
-## ▍ What's still in the oven
-
-Being transparent about the state of things, for the record: the **follow-up scheduler is scaffolded but not yet wired up.** `tester.py` already defines the exact two behaviors it's built for and seeds mock data to prove them out —
-
-- **Task A:** a lead who never replied to the auto-text gets a gentle follow-up SMS after a couple of hours of silence.
-- **Task B:** a lead who *did* reply, but whose status the owner never updated, triggers a reminder nudge instead of quietly going stale.
-
-`APScheduler` is already a dependency and `app/scheduler/jobs.py` is staged for exactly this — it's the next thing that gets built, not a hidden gap.
+| Job | Cadence | What it does |
+|:--|:--|:--|
+| **Follow-up SMS** | every 10 min | Texts a lead who never replied after 2 hours of silence. Once only. |
+| **Owner reminder** | every 15 min | Nudges the owner about a replied lead still sitting on `NEW` after 4 hours. |
+| **Watchdog** | every 5 min | Reports queue backlog, dead letters, degraded config, zero clients. |
+| **Heartbeat** | daily 9am | `✅ System healthy` with 24-hour lead, reply and booking counts. |
 
 <br />
 
@@ -220,20 +203,37 @@ Being transparent about the state of things, for the record: the **follow-up sch
 
 | Layer | Technology |
 |:--|:--|
-| **Voice & SMS** | `Twilio` — call forwarding, missed-call detection, two-way SMS |
-| **Server** | `FastAPI` + `uvicorn` — async webhooks, lifespan-managed background bot |
-| **Owner interface** | `python-telegram-bot` — rich cards, inline one-tap status buttons |
+| **Voice & SMS** | `Twilio` — IVR, DTMF capture, voicemail, two-way SMS, delivery receipts |
+| **Server** | `FastAPI` + `uvicorn` — async webhooks, lifespan-managed bot and workers |
+| **Owner interface** | `python-telegram-bot` — rich HTML cards, inline one-tap status buttons |
 | **Live CRM** | `gspread` + Google Sheets API — per-client, idempotent, human-readable |
-| **Persistence** | `MongoDB` via `motor` (fully async) — leads + multi-tenant client configs |
-| **Scheduling (upcoming)** | `APScheduler` — timed follow-ups and owner reminders |
+| **Persistence** | `MongoDB` via `motor` — leads + multi-tenant client configs |
+| **Reliability** | `SQLite` outbox — durable retry queue for every side effect |
+| **Scheduling** | `APScheduler` — follow-ups, reminders, watchdog, heartbeat |
 
 </div>
+
+<br />
+
+## ▍ Running it
+
+```bash
+cp .env.example .env          # fill it in, including the FALLBACK_* block
+docker compose up -d --build
+docker compose exec app python diagnose.py        # full self-test
+docker compose exec app python manage_clients.py add
+```
+
+Full instructions, Twilio console settings and the operational runbook are in
+**[DEPLOY.md](DEPLOY.md)**. Resilience tests: `python tests/test_resilience.py`.
 
 <br />
 
 ## ▍ Philosophy
 
 The best automation is the one the business owner never has to think about. They don't learn a dashboard. They don't check an inbox. Their phone rings, they miss it, and moments later a lead is already being worked — by a system, until a single tap says it's theirs to finish.
+
+Which means the system has to be trustworthy enough to stop watching. That is what most of the engineering above is actually for.
 
 <br />
 

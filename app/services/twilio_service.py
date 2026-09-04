@@ -1,89 +1,188 @@
 # app/services/twilio_service.py
-from twilio.twiml.voice_response import VoiceResponse, Gather
+"""TwiML generation and outbound SMS."""
+
+import asyncio
+from typing import Optional
+
 from twilio.rest import Client
+from twilio.twiml.voice_response import Gather, VoiceResponse
+
 from app.config import settings
-from app.database import leads_collection
-from datetime import datetime, timezone
+from app.logging_config import get_logger, redact_phone
+
+log = get_logger("twilio")
 
 twilio_client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
 
-def generate_ivr_twiml(action_url: str, business_name: str = "our team") -> str:
-    """Generates the interactive IVR menu with DTMF digit capture."""
+
+# ------------------------------------------------------------------- TwiML
+def _speakable(url: str) -> str:
+    """Turn https://vectorworkflows.com into something Polly reads cleanly."""
+    if not url:
+        return ""
+    clean = url.replace("https://", "").replace("http://", "").rstrip("/")
+    return clean.replace(".", " dot ").replace("/", " slash ")
+
+
+def generate_ivr_twiml(
+    action_url: str,
+    business_name: str = "our team",
+    sms_enabled: bool = True,
+    website_url: str = "",
+) -> str:
+    """
+    Two menus, one switch.
+
+    sms_enabled=False is the honest mode for a number that cannot currently
+    send SMS (A2P / toll-free verification incomplete). Promising a text that
+    never arrives is worse than not offering one - the caller decides you are
+    unreliable within about ninety seconds.
+    """
     response = VoiceResponse()
 
     gather = Gather(
         num_digits=1,
         action=action_url,
         method="POST",
-        timeout=6
+        timeout=settings.IVR_GATHER_TIMEOUT,
+        input="dtmf",
+        action_on_empty_result=False,
     )
-    
-    # Dynamic greeting injected with the specific client's business name
-    gather.say(
-        f"Thanks for calling {business_name}! "
-        "Press 1 to leave a brief voicemail about how we can help you. "
-        "Press 2 to receive a text with a link to our intake form. "
-        "Press 3 to receive a text with a link to book a meeting on our calendar. "
-        "If you'd rather not press anything, stay on the line and we will text you all of our links automatically.",
-        voice="Polly.Amy",
-        language="en-US"
-    )
+
+    if sms_enabled:
+        prompt = (
+            f"Thanks for calling {business_name}! "
+            "Press 1 to leave a brief voicemail about how we can help you. "
+            "Press 2 to receive a text with a link to our intake form. "
+            "Press 3 to receive a text with a link to book a meeting on our calendar. "
+            "If you'd rather not press anything, stay on the line "
+            "and we will text you all of our links automatically."
+        )
+        holding = "Thanks for holding! We just texted you all our links. Have a great day!"
+    else:
+        site = _speakable(website_url)
+        visit = f" Or visit {site} to book a time instantly on our calendar." if site else ""
+        prompt = (
+            f"Thanks for calling {business_name}! "
+            "Press 1 to leave a brief voicemail about what you need, "
+            "and we'll call you back. "
+            "Press 2 to request a callback, and we'll get straight back to you today."
+            f"{visit}"
+        )
+        holding = ("Thanks for holding! We've got your number and "
+                   "someone will get back to you shortly. Have a great day!")
+
+    gather.say(prompt, voice="Polly.Amy", language="en-US")
     response.append(gather)
 
-    response.say(
-        "Thanks for holding! We just texted you all our links. Have a great day!",
-        voice="Polly.Amy",
-        language="en-US"
-    )
-    
-    # CRITICAL FIX: Use '&' instead of '?' so it doesn't mangle the caller ID
+    response.say(holding, voice="Polly.Amy", language="en-US")
+    # '&' not '?': action_url already carries a query string.
     response.redirect(f"{action_url}&Digits=timeout", method="POST")
-
     return str(response)
 
 
-def generate_voicemail_twiml(recording_action_url: str) -> str:
-    """Prompts caller to record a voicemail (Audio Only, No Transcription)."""
+def generate_voicemail_twiml(recording_action_url: str, recording_status_url: str) -> str:
+    """
+    NOTE: anything after <Record action="..."> is unreachable - Twilio follows
+    the action URL's TwiML instead. The old code's "thank you" and <Hangup>
+    were dead, so callers got dead air. The thank-you now lives in the
+    /recording-action response.
+
+    recordingStatusCallback is the RELIABLE trigger: if the caller hangs up
+    instead of pressing #, Twilio may never hit the action URL, but the status
+    callback always fires once the media exists.
+    """
     response = VoiceResponse()
     response.say(
-        "Please leave your message after the tone. Press pound or hang up when you are finished.",
+        "Please leave your message after the tone. "
+        "Press pound or hang up when you are finished.",
         voice="Polly.Amy",
-        language="en-US"
+        language="en-US",
     )
     response.record(
         action=recording_action_url,
-        max_length=120,
+        method="POST",
+        max_length=settings.VOICEMAIL_MAX_SECONDS,
+        timeout=5,
         finish_on_key="#",
-        play_beep=True
+        play_beep=True,
+        recording_status_callback=recording_status_url,
+        recording_status_callback_method="POST",
+        recording_status_callback_event="completed",
     )
-    response.say("Thank you, we received your recording. We will be in touch shortly!", voice="Polly.Amy")
+    # Only reached if <Record> fails to start at all.
+    response.say("Sorry, we could not record your message. "
+                 "Please call back or reach us through our website. Goodbye.",
+                 voice="Polly.Amy")
     response.hangup()
     return str(response)
 
 
-async def send_custom_sms(client_config: dict, caller_phone: str, call_sid: str, message_body: str, lead_type: str = "IVR_INTERACTION"):
-    """Sends a specific SMS payload and tracks it in MongoDB."""
-    # CRITICAL FIX: Safe exit if the database is empty
-    if not client_config or not client_config.get("twilio_number"):
-        print("⚠️ Missing database configuration or Twilio number. Cannot send SMS.")
-        return
+def generate_thank_you_twiml(message: str) -> str:
+    response = VoiceResponse()
+    response.say(message, voice="Polly.Amy", language="en-US")
+    response.hangup()
+    return str(response)
 
+
+def generate_safe_fallback_twiml() -> str:
+    """
+    Last-resort TwiML returned if an unhandled exception reaches the top of a
+    voice route. A caller hears something polite rather than Twilio's robotic
+    "an application error has occurred".
+    """
+    response = VoiceResponse()
+    response.say(
+        "Thanks for calling! We are having a brief technical issue, "
+        "but we have your number and will get back to you shortly. Goodbye.",
+        voice="Polly.Amy",
+        language="en-US",
+    )
+    response.hangup()
+    return str(response)
+
+
+# --------------------------------------------------------------------- SMS
+async def send_sms(from_number: str, to_number: str, body: str) -> str:
+    """
+    Send an SMS. Returns the message SID. RAISES on failure so the outbox retries.
+
+    Uses the Messaging Service when one is configured - that is the correct
+    pattern once a number is attached to a service, and it is what carries the
+    A2P campaign registration.
+
+    messages.create is blocking HTTP, so it runs in a thread; calling it
+    directly inside async code stalls the whole event loop, which on a busy
+    line means delayed call answers.
+    """
+    kwargs = {"body": body, "to": to_number}
+
+    if settings.TWILIO_MESSAGING_SERVICE_SID:
+        kwargs["messaging_service_sid"] = settings.TWILIO_MESSAGING_SERVICE_SID
+    elif from_number:
+        kwargs["from_"] = from_number
+    else:
+        raise ValueError("No messaging service SID and no from_number configured")
+
+    msg = await asyncio.to_thread(twilio_client.messages.create, **kwargs)
+    log.info("SMS %s dispatched to %s", msg.sid, redact_phone(to_number))
+    return msg.sid
+
+
+async def account_healthcheck() -> tuple[bool, str]:
     try:
-        msg = twilio_client.messages.create(
-            body=message_body,
-            from_=client_config["twilio_number"],
-            to=caller_phone
+        acct = await asyncio.to_thread(
+            twilio_client.api.accounts(settings.TWILIO_ACCOUNT_SID).fetch
         )
-        await leads_collection.update_one(
-            {"call_sid": call_sid},
-            {"$set": {
-                "initial_sms_sent": True,
-                "initial_sms_time": datetime.now(timezone.utc),
-                "initial_sms_sid": msg.sid,
-                "lead_type": lead_type
-            }},
-            upsert=True
-        )
-        print(f"✅ Dispatched {lead_type} SMS to {caller_phone} (SID: {msg.sid})")
-    except Exception as e:
-        print(f"❌ Failed to send SMS to {caller_phone}: {e}")
+        return True, f"OK ({acct.friendly_name}, status={acct.status})"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+async def list_incoming_numbers() -> list[str]:
+    try:
+        numbers = await asyncio.to_thread(twilio_client.incoming_phone_numbers.list, limit=50)
+        return [n.phone_number for n in numbers]
+    except Exception as exc:
+        log.error("Could not list Twilio numbers: %s", exc)
+        return []
